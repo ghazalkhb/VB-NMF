@@ -8,7 +8,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MultiLabelBinarizer
 
 # Load data
-df = pd.read_csv("C:/Users/acer/Desktop/5P77/Project/VBNMF/train.csv")
+df = pd.read_csv("dataset path")
 df['text'] = df['TITLE'] + ' ' + df['ABSTRACT']
 df['text'] = df['text'].apply(lambda x: x.lower().replace('_', ' '))
 
@@ -51,7 +51,7 @@ class VBNMF(nn.Module):
 model = VBNMF(n_samples, n_features, n_components)
 optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-# Loss function (ELBO) now using MSE and label influence
+# Loss function (ELBO)
 def loss_function(recon_x, x, labels, mean_W, log_var_W, mean_H, log_var_H):
     MSE = torch.mean((recon_x - x) ** 2)
     Label_Loss = torch.mean((mean_W - labels) ** 2)  # Encourage alignment with labels
