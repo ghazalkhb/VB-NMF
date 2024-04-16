@@ -10,7 +10,13 @@ from sklearn.preprocessing import MultiLabelBinarizer
 # Load data
 df = pd.read_csv("dataset path")
 df['text'] = df['TITLE'] + ' ' + df['ABSTRACT']
-df['text'] = df['text'].apply(lambda x: x.lower().replace('_', ' '))
+
+
+# Remove all numbers and words with length less than 4 characters
+df['text'] = df['text'].apply(lambda x: re.sub(r'\b\w{1,3}\b', '', x))  # Remove short words
+df['text'] = df['text'].apply(lambda x: re.sub(r'\d+', '', x))  # Remove digits
+df['text'] = df['text'].apply(lambda x: x.lower().replace('_', ' '))  # To lowercase and replace underscores
+
 
 # Prepare the labels
 labels = df.iloc[:, 3:9].values  # Assuming labels are in columns 4-9
