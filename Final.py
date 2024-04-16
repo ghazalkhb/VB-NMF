@@ -1,105 +1,82 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import pandas as pd
 import numpy as np
 import re
-import torch
-import torch.nn as nn
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MultiLabelBinarizer
 
-# Load the dataset from CSV
+# Load data
 df = pd.read_csv("C:/Users/acer/Desktop/5P77/Project/VBNMF/train.csv")
-
-# Combine the title and abstract columns into a single text column
 df['text'] = df['TITLE'] + ' ' + df['ABSTRACT']
+df['text'] = df['text'].apply(lambda x: x.lower().replace('_', ' '))
 
-# Function to preprocess text
-def preprocess_text(text):
-    # Lowercase the text
-    text = text.lower()
-    # Remove all numbers (attached or standalone) and underscores
-    text = re.sub(r'\d+', '', text)  # Removes all digits
-    text = re.sub(r'_', ' ', text)   # Replace underscores with spaces to ensure they are not part of tokens
-    # Tokenize and remove words with less than 5 characters
-    tokens = text.split()
-    tokens = [token for token in tokens if len(token) > 4]
-    return ' '.join(tokens)
+# Prepare the labels
+labels = df.iloc[:, 3:9].values  # Assuming labels are in columns 4-9
+label_tensor = torch.tensor(labels, dtype=torch.float)
 
-# Apply preprocessing to the text column
-df['text'] = df['text'].apply(preprocess_text)
+# Text vectorization
+tfidf = TfidfVectorizer(max_features=50000, stop_words='english', min_df=0.01, max_df=0.3)
+tfidf_matrix = tfidf.fit_transform(df['text']).toarray()
+tfidf_tensor = torch.tensor(tfidf_matrix, dtype=torch.float)
 
-# Extract the text and topic labels
-texts = df['text'].tolist()
-labels = df.iloc[:, 3:-1].values.astype(int)
-label_names = df.columns[3:-1]  # Extract label names from the DataFrame
+# Parameters
+n_samples, n_features = tfidf_tensor.shape
+n_components = label_tensor.shape[1]  # Number of topics equals number of labels
 
-# Split the dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(texts, labels, test_size=0.2, random_state=42)
+# Define the VB-NMF model
+class VBNMF(nn.Module):
+    def __init__(self, n_samples, n_features, n_components):
+        super(VBNMF, self).__init__()
+        # Variational parameters for W
+        self.mean_W = nn.Parameter(torch.randn(n_samples, n_components))
+        self.log_var_W = nn.Parameter(torch.randn(n_samples, n_components))
 
-# Convert text to TF-IDF features with sparse matrices
-vectorizer = TfidfVectorizer(max_features=50000, stop_words='english', token_pattern=r'\b[a-zA-Z]{5,}\b', min_df=0.01)
-tfidf_matrix_train = vectorizer.fit_transform(X_train)
-tfidf_matrix_test = vectorizer.transform(X_test)
+        # Variational parameters for H
+        self.mean_H = nn.Parameter(torch.randn(n_components, n_features))
+        self.log_var_H = nn.Parameter(torch.randn(n_components, n_features))
 
+    def reparameterize(self, mean, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mean + eps * std
 
-# Convert the TF-IDF matrices to PyTorch sparse tensors
-X_train_tensor_sparse = torch.tensor(tfidf_matrix_train.toarray(), dtype=torch.float32)
-X_test_tensor_sparse = torch.tensor(tfidf_matrix_test.toarray(), dtype=torch.float32)
+    def forward(self):
+        W = self.reparameterize(self.mean_W, self.log_var_W)
+        H = self.reparameterize(self.mean_H, self.log_var_H)
+        return torch.relu(W @ H)  # Ensure non-negativity
 
-# Define a simple classifier model
-class Classifier(nn.Module):
-    def __init__(self, input_size, output_size):
-        super(Classifier, self).__init__()
-        self.fc = nn.Linear(input_size, output_size)
+# Model, Loss, and Optimizer
+model = VBNMF(n_samples, n_features, n_components)
+optimizer = optim.Adam(model.parameters(), lr=0.01)
 
-    def forward(self, x):
-        x = torch.sigmoid(self.fc(x))  # Sigmoid activation for multi-label classification
-        return x
+# Loss function (ELBO) now using MSE and label influence
+def loss_function(recon_x, x, labels, mean_W, log_var_W, mean_H, log_var_H):
+    MSE = torch.mean((recon_x - x) ** 2)
+    Label_Loss = torch.mean((mean_W - labels) ** 2)  # Encourage alignment with labels
+    KLD_W = -0.5 * torch.sum(1 + log_var_W - mean_W.pow(2) - log_var_W.exp())
+    KLD_H = -0.5 * torch.sum(1 + log_var_H - mean_H.pow(2) - log_var_H.exp())
+    return MSE + Label_Loss + KLD_W + KLD_H
 
-# Instantiate the classifier model
-input_size = X_train_tensor_sparse.shape[1]
-output_size = y_train.shape[1]  # Number of topics
-model = Classifier(input_size, output_size)
-
-# Define the loss function for multi-label classification
-loss_fn = nn.BCELoss()
-
-# Define the optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
-
-# Train the classifier model
-epochs = 100
-for epoch in range(epochs):
+# Training loop
+for epoch in range(100):
     optimizer.zero_grad()
-    outputs = model(X_train_tensor_sparse)
-    loss = loss_fn(outputs, torch.tensor(y_train, dtype=torch.float32))
+    recon_batch = model()
+    loss = loss_function(recon_batch, tfidf_tensor, label_tensor, model.mean_W, model.log_var_W, model.mean_H, model.log_var_H)
     loss.backward()
     optimizer.step()
-    if (epoch+1) % 10 == 0:
-        print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+    if epoch % 10 == 0:
+        print(f'Epoch {epoch}, Loss: {loss.item()}')
 
-# Extract the top words for each topic
+# Extract top 10 words for each topic
+feature_names = tfidf.get_feature_names_out()
+with torch.no_grad():
+    H_matrix = model.mean_H.detach().numpy()
 top_words_per_topic = []
-with torch.no_grad():
-    for i in range(output_size):
-        topic_weights = model.fc.weight[i].numpy()
-        top_word_indices = np.argsort(topic_weights)[::-1][:10]  # Indices of top 10 words
-        top_words = [vectorizer.get_feature_names_out()[idx] for idx in top_word_indices]
-        top_words_per_topic.append(top_words)
+for i, topic_weights in enumerate(H_matrix):
+    top_indices = topic_weights.argsort()[-10:][::-1]
+    top_words = [feature_names[j] for j in top_indices]
+    top_words_per_topic.append(top_words)
+    print(f'Topic {df.columns[3+i]}: {", ".join(top_words)}')
 
-# Print the top words for each topic along with the name of the topic
-for i, (label_name, top_words) in enumerate(zip(label_names, top_words_per_topic)):
-    print(f"{label_name}: {', '.join(top_words)}")
-
-# Evaluate the model on the testing set
-with torch.no_grad():
-    outputs = model(X_test_tensor_sparse)
-    # Round the predictions to 0 or 1
-    predicted_labels = torch.round(outputs).numpy()
-    # Calculate accuracy for each label
-    label_accuracy = (predicted_labels == y_test).mean(axis=0)
-    # Calculate overall accuracy
-    overall_accuracy = np.mean(predicted_labels == y_test)
-    print(f'Overall Accuracy: {overall_accuracy:.4f}')
-    print('Label-wise Accuracy:')
-    for i, acc in enumerate(label_accuracy):
-        print(f'{label_names[i]}: {acc:.4f}')
